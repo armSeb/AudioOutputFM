@@ -60,6 +60,8 @@ static const char *HOSTNAME = "fmtx";
 static const char *AP_SSID  = "ESP32-FM-Setup";
 static const char *AP_PASS  = "fmsetup123";
 static const int   MAX_STATIONS = 8;
+// Shown on the page and at boot: library version + build time of this binary
+static const char *FW_VERSION = AUDIOOUTPUTFM_VERSION " (built " __DATE__ " " __TIME__ ")";
 // Decoder memory + stream buffer share ONE block, the biggest the heap has at boot (~110 KB), carved
 // per station once the codec is known: an MP3 decoder takes ~30 KB and leaves ~80 KB of stream
 // buffer; the HE-AAC decoder takes 87.4 KB (input 1.6 + output 8 + Helix core 28.1 + SBR 49.6) and
@@ -112,13 +114,11 @@ void loadConfig()
     cfg.count   = prefs.getInt("count", -1);
     cfg.sel     = prefs.getInt("sel", 0);
     if (cfg.count < 0) {                       // first boot: two example stations
-        cfg.count = 3;
+        cfg.count = 2;
         cfg.name[0] = "Frequence3";
         cfg.url[0]  = "http://frequence3.net-radio.fr/frequence3-256.mp3";
         cfg.name[1] = "Irish Pub Radio";
         cfg.url[1]  = "http://solid24.streamupsolutions.com/proxy/vbkiacud?mp=/live";
-        cfg.name[2] = "KVB (StreamMP3FromHTTP example)";
-        cfg.url[2]  = "http://kvbstreams.dyndns.org:8000/wkvi-am";
     } else {
         cfg.count = constrain(cfg.count, 0, MAX_STATIONS);
         for (int i = 0; i < cfg.count; i++) {
@@ -415,6 +415,7 @@ void handleState()
     j += ",\"want\":" + String(wantOnAir ? "true" : "false");
     j += ",\"uptime\":" + String(millis() / 1000);
     j += ",\"reset\":" + jstr(resetReason());
+    j += ",\"fw\":" + jstr(FW_VERSION);
     j += "}}";
     server.send(200, "application/json", j);
 }
@@ -898,6 +899,7 @@ void setup()
     wdt.trigger_panic = true;
     esp_task_wdt_reconfigure(&wdt);
     wantOnAir = cfg.onair;
+    Serial.printf("FM transmitter %s\n", FW_VERSION);
     Serial.printf("Last reset: %s. Starting %s\n", resetReason(), cfg.onair ? "on air" : "off air");
 
     // setup() runs on core 1, which the stereo modulator is about to take: start from core 0

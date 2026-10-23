@@ -86,6 +86,6 @@ There is no unit-test harness, and real validation needs hardware: an ESP32, a r
 
 - **Language and style.** English everywhere (code, comments, docs). Comments explain *why*, especially for hardware facts found by measurement. Keep the GPL-3.0-or-later header on source files.
 - **Style.** 4-space indent, `camelCase_` members, no exceptions, no RTTI, no dynamic allocation in the ISR or the loop.
-- **Versioning.** Bump `version` in `library.properties` and `library.json` and add a `CHANGELOG.md` entry for every user-visible change.
+- **Versioning.** Bump `version` in `library.properties`, `library.json` and `AUDIOOUTPUTFM_VERSION` in `AudioOutputFM.h` and add a `CHANGELOG.md` entry for every user-visible change.
 - **README.** Keep the README's validation table honest: mark what was tested on hardware and what wasn't.
 - **Safety.** This is RF. Don't add features that raise output power or widen the band, and keep the warnings in the docs.

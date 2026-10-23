@@ -116,7 +116,7 @@ async function saveWifi(){try{await post('/api/wifi',{ssid:$('ssid').value,pass:
 function fill(c){for(const k of ['freq','ps','preemph','pty','gain','k','h','charset','ssid'])$(k).value=c[k];for(const k of ['stereo','rds','agc','rtab'])$(k).checked=c[k]}
 function status(c){const s=c.status,st=c.stations[c.sel];
   airState=s.want;paintAir(s.want);
-  $('sys').textContent='up '+dur(s.uptime)+' \u00b7 last reset: '+s.reset+' \u00b7 lowest free heap '+Math.round(s.minheap/1024)+' kB (largest block now '+Math.round(s.largest/1024)+' kB, lowest '+Math.round(s.minlargest/1024)+' kB)'+' \u00b7 decoders: MP3'+(s.aac?' + AAC':' only');
+  $('sys').textContent='firmware '+s.fw+' \u00b7 up '+dur(s.uptime)+' \u00b7 last reset: '+s.reset+' \u00b7 lowest free heap '+Math.round(s.minheap/1024)+' kB (largest block now '+Math.round(s.largest/1024)+' kB, lowest '+Math.round(s.minlargest/1024)+' kB)'+' \u00b7 decoders: MP3'+(s.aac?' + AAC':' only');
   if(!s.onair){$('title').textContent='Off air';$('sub').textContent=(st?st.name+' \u00b7 ':'')+c.freq.toFixed(2)+' MHz';$('stats').textContent=(s.ap?'':'RSSI '+s.rssi+' dBm (AP '+s.bssid+', ch '+s.ch+') \u00b7 ')+'heap '+Math.round(s.heap/1024)+' kB';$('ip').textContent=s.ap?'setup access point '+s.ip:s.ip;return}
   $('ip').textContent=s.ap?'setup access point '+s.ip:s.ip;
   $('title').textContent=s.title||(st?st.name:'-');

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.2
+
+- **FMTransmitterWeb shows its firmware version.** The System section of the page, the boot log and `/api/state` (`status.fw`) give the library version and build time. `AUDIOOUTPUTFM_VERSION` is now defined in `AudioOutputFM.h`.
+- **Default stations.** The mono AM test stream (KVB) is no longer among them. An existing station list in NVS is kept: delete it from the page if needed.
+
 ## 0.9.1
 
 - **Accurate pre-emphasis.** A first-order IIR is fitted at run time to the analog 50/75 µs curve, by weighted least squares over 0–15 kHz. Error at 44.1/48 kHz is now 0.1 dB or less; the previous first difference was 1.7 dB short at 15 kHz, which gave slightly dull treble. The extra cost is one multiply-add per sample and channel. Not yet validated on hardware.

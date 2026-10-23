@@ -41,6 +41,8 @@
 
 #include <Arduino.h>
 
+#define AUDIOOUTPUTFM_VERSION "0.9.2"            // keep in sync with library.properties / library.json
+
 #if defined(ESP32) && defined(CONFIG_IDF_TARGET_ESP32)
 
 #include <atomic>

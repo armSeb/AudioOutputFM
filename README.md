@@ -111,7 +111,7 @@ There are no credentials in the code. On first boot, the ESP32 opens the access 
 - **Transmitter.** Frequency, station name (PS), pre-emphasis, programme type, gain, and stereo/RDS/AGC switches.
   - Under *Advanced*: the stereo trims (`k`, phase), the RDS character set, and the RadioText A/B toggle.
   - Everything applies live, except switching mono/stereo, which restarts the ESP32.
-- **System.** Uptime, last reset cause, lowest free heap, largest free block (current and lowest), available decoders, and firmware upload.
+- **System.** Firmware version and build time, uptime, last reset cause, lowest free heap, largest free block (current and lowest), available decoders, and firmware upload.
 - **Wi-Fi.** SSID and password. They are stored in NVS and never echoed back.
 
 All settings survive a reboot, including the on/off-air state.
