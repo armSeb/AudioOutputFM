@@ -240,7 +240,7 @@ ConsumeSample (generator task, float)                       Timer ISR @ sample r
     noise shaping → push to ring ──────────────────────────►
 ```
 
-This is the same split as with a DAC: the generator does the floating-point work, and the interrupt plays the role of the I2S DMA engine. The 15 kHz low-pass keeps the 19 kHz pilot region empty, so receivers don't falsely switch to stereo. Noise shaping pushes the 152.6 Hz quantization noise toward high frequencies, where the receiver's de-emphasis removes it. One regi2c write costs about 3.4 µs, so the interrupt takes roughly 18 % of core 1 at 44.1 kHz.
+This is the same split as with a DAC: the generator does the floating-point work, and the interrupt plays the role of the I2S DMA engine. The 15 kHz low-pass keeps the 19 kHz pilot region empty, so receivers don't falsely switch to stereo. The pre-emphasis is a first-order IIR fitted at run time to the analog 50 or 75 µs curve up to 15 kHz: within about 0.1 dB at 44.1 and 48 kHz, where a plain first difference falls 1.7 dB short at 15 kHz. As in broadcast processors, it comes before the limiter, so the emphasized treble can't overdeviate. In stereo it is applied to L and R before matrixing. Noise shaping pushes the 152.6 Hz quantization noise toward high frequencies, where the receiver's de-emphasis removes it. One regi2c write costs about 3.4 µs, so the interrupt takes roughly 18 % of core 1 at 44.1 kHz.
 
 ### Stereo
 

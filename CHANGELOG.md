@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1
+
+- **Accurate pre-emphasis.** A first-order IIR is fitted at run time to the analog 50/75 µs curve, by weighted least squares over 0–15 kHz. Error at 44.1/48 kHz is now 0.1 dB or less; the previous first difference was 1.7 dB short at 15 kHz, which gave slightly dull treble. The extra cost is one multiply-add per sample and channel. Not yet validated on hardware.
+
 ## 0.9.0: first public release
 
 - **New `ToneTest` example.** Stereo test tones (left, right, in phase, out of phase) and RDS, with no Wi-Fi. It is meant for hardware bring-up and separation tuning.

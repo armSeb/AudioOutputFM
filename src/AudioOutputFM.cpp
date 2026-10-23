@@ -658,20 +658,59 @@ void AudioOutputFM::designResampler(float fsIn)
     designedFor_ = (int)fsIn;
 }
 
+// Pre-emphasis as a first-order IIR, H(z) = g (1 + b z^-1) / (1 + a z^-1), fitted to the analog
+// curve |H(f)|^2 = 1 + (2 pi f tau)^2 from 0 to 15 kHz. The plain first difference used before
+// fell 1.7 dB short at 15 kHz (44.1 kHz input); this stays within ~0.1 dB at 44.1/48 kHz.
+// Method: with c = cos(w), |H|^2 = K (1 + b^2 + 2 b c) / (1 + a^2 + 2 a c), so fitting
+// T (1 + A c) = N0 + N1 c is linear in (A, N0, N1): weighted least squares (weight 1/T, i.e.
+// relative error), then a and b come back from A = 2a / (1 + a^2) and N1 / N0 = 2b / (1 + b^2),
+// and g sets unity gain at DC. Runs once per rate or setting change (float: double is software-emulated).
+static void designPreemphasis(float fs, float tau, float &g, float &a, float &b)
+{
+    g = 1.0f; a = 0.0f; b = 0.0f;
+    if (tau <= 0.0f) return;
+    const int n = 32;
+    const float fmax = fminf(15000.0f, 0.45f * fs);
+    float m[3][3] = {{0}}, v[3] = {0};                     // normal equations M^T M x = M^T y
+    for (int i = 1; i <= n; i++) {
+        float f = fmax * i / n, c = cosf(2.0f * (float)M_PI * f / fs);
+        float wt = 2.0f * (float)M_PI * f * tau, T = 1.0f + wt * wt;
+        float row[3] = { -c, 1.0f / T, c / T };          // (T (1 + A c) = N0 + N1 c) / T
+        for (int r = 0; r < 3; r++) {
+            v[r] += row[r];                              // y = 1
+            for (int k = 0; k < 3; k++) m[r][k] += row[r] * row[k];
+        }
+    }
+    auto det3 = [](float q[3][3]) {
+        return q[0][0] * (q[1][1] * q[2][2] - q[1][2] * q[2][1])
+             - q[0][1] * (q[1][0] * q[2][2] - q[1][2] * q[2][0])
+             + q[0][2] * (q[1][0] * q[2][1] - q[1][1] * q[2][0]);
+    };
+    float d = det3(m), x[3];
+    if (fabsf(d) < 1e-30f) { a = 0.0f; b = -expf(-1.0f / (tau * fs)); g = 1.0f / (1.0f + b); return; }
+    for (int k = 0; k < 3; k++) {                        // Cramer's rule
+        float q[3][3];
+        memcpy(q, m, sizeof(q));
+        for (int r = 0; r < 3; r++) q[r][k] = v[r];
+        x[k] = det3(q) / d;
+    }
+    auto root = [](float r) {                            // x with 2x / (1 + x^2) = r, |x| < 1
+        if (r > 0.999999f) r = 0.999999f; else if (r < -0.999999f) r = -0.999999f;
+        return fabsf(r) < 1e-12f ? 0.0f : (1.0f - sqrtf(1.0f - r * r)) / r;
+    };
+    float aa = root(x[0]), bb = root(x[2] / x[1]);
+    a = aa;
+    b = bb;
+    g = (1.0f + aa) / (1.0f + bb);                       // unity gain at DC
+}
+
 void AudioOutputFM::setupDsp()
 {
     float fs = (float)(hertz ? hertz : 44100);
     float fc = fminf(15000.0f, 0.45f * fs);
     lp1_.lowpass(fs, fc, 0.5412f);             // 4th-order Butterworth (mono path)
     lp2_.lowpass(fs, fc, 1.3066f);
-    float tau = tauUs_ * 1e-6f;
-    if (tau > 0.0f) {
-        alpha_ = expf(-1.0f / (tau * fs));
-        norm_ = 1.0f / (1.0f - alpha_);
-    } else {
-        alpha_ = 0.0f;
-        norm_ = 1.0f;
-    }
+    designPreemphasis(fs, tauUs_ * 1e-6f, peG_, peA_, peB_);
     rel_  = expf(-1.0f / (0.150f * fs));       // limiter release 150 ms
     agcK_ = 1.0f - expf(-1.0f / (3.0f * fs));  // power averaged over 3 s
     agcS_ = 1.0f - expf(-1.0f / (0.5f * fs));  // gain smoothing 0.5 s
@@ -733,9 +772,10 @@ bool AudioOutputFM::consumeMono(int16_t sample[2])
     levelControl(x, g);
     x *= g;
 
-    // Pre-emphasis: H(z) = (1 - a z^-1) / (1 - a), unity gain at DC
-    float y = (x - alpha_ * x1_) * norm_;
+    // Pre-emphasis (see designPreemphasis)
+    float y = peG_ * (x + peB_ * x1_) - peA_ * y1_;
     x1_ = x;
+    y1_ = y;
 
     // Peak limiter (instant attack) + safety hard clip
     float a = fabsf(y);
@@ -772,10 +812,12 @@ bool AudioOutputFM::consumeStereo(int16_t sample[2])
     r *= g;
 
     // Per-channel pre-emphasis (before matrixing, as broadcast processors do)
-    float yl = (l - alpha_ * x1_) * norm_;
-    float yr = (r - alpha_ * x1r_) * norm_;
+    float yl = peG_ * (l + peB_ * x1_) - peA_ * y1_;
+    float yr = peG_ * (r + peB_ * x1r_) - peA_ * y1r_;
     x1_ = l;
     x1r_ = r;
+    y1_ = yl;
+    y1r_ = yr;
 
     // Linked peak limiter: |L|, |R| <= 1 keeps (L+R)/2 + (L-R)/2*sub within +/-1
     float a = fmaxf(fabsf(yl), fabsf(yr));

@@ -188,8 +188,9 @@ private:
     volatile float kDiff_ = 1.11f, phaseDeg_ = -22.0f, pilot_ = 0.09f;
     volatile bool  agcOn_ = false, dspDirty_ = true;
     Biquad lp1_, lp2_;
-    float  alpha_ = 0, norm_ = 1, rel_ = 0, agcK_ = 0, agcS_ = 0, qScale_ = 0;
-    float  x1_ = 0, x1r_ = 0, err_ = 0, env_ = 0, pw_ = 0, agc_ = 1, peak_ = 0;
+    float  peG_ = 1, peA_ = 0, peB_ = 0;      // pre-emphasis IIR (designPreemphasis)
+    float  rel_ = 0, agcK_ = 0, agcS_ = 0, qScale_ = 0;
+    float  x1_ = 0, x1r_ = 0, y1_ = 0, y1r_ = 0, err_ = 0, env_ = 0, pw_ = 0, agc_ = 1, peak_ = 0;
     uint32_t clips_ = 0;
 
     // RDS encoder (generator context)
