@@ -1,0 +1,37 @@
+name: Compile examples
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The real target. FMTransmitterWeb needs the bigger app partition.
+          - fqbn: esp32:esp32:esp32:PartitionScheme=min_spiffs
+          # PSRAM build of the same (WROVER modules)
+          - fqbn: esp32:esp32:esp32:PartitionScheme=min_spiffs,PSRAM=enabled
+          # Other targets must compile to an empty sketch
+          - fqbn: esp32:esp32:esp32s3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/compile-sketches@v1
+        with:
+          fqbn: ${{ matrix.fqbn }}
+          platforms: |
+            - name: esp32:esp32
+              source-url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+              version: 3.3.5
+          libraries: |
+            - source-path: ./
+            - name: ESP8266Audio
+          sketch-paths: |
+            - examples
+          cli-compile-flags: |
+            - --warnings
+            - all
+          enable-warnings-report: true
