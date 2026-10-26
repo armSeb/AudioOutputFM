@@ -8,7 +8,7 @@
 // Serial commands (115200 baud):
 //   f 100.1   frequency (MHz)          g 1.0   gain after AGC      a 1|0   AGC on/off
 //   d 75000   deviation (Hz)           p 50    pre-emphasis (us, 0 = none)
-//   x 1|0     carrier on/off           s       statistics
+//   x 1|0     carrier on/off           s       statistics       t   timing (then restart it)
 //   stereo only:  k 1.11  L-R gain      h -22   38 kHz phase trim (deg)     P 0.09  pilot level
 //                 R 1|0   RDS on/off    T text  RadioText (the ICY StreamTitle is sent automatically)
 //                 C 0|1|2 RDS charset: 0 RDS table, 1 ASCII (no accents), 2 Latin-1 (resends the title)
@@ -90,6 +90,18 @@ void startStream()
     }
 }
 
+// Timing of the modulator (cumulative since the last 't'): see AudioOutputFM::Stats
+static void printTiming(bool reset)
+{
+    AudioOutputFM::Stats st = out->GetStats(false);
+    Serial.printf("timing | writer avg %.2f us, max %.2f us, idle %.0f%% | regi2c lock wait max %.1f us"
+                  " | deadline late max %.1f us, skipped %lu, overlong %lu"
+                  " | producer %.0f cycles/sample, %.1f%% of its core\n",
+                  st.isrAvgUs, st.isrMaxUs, st.slackPct, st.lockMaxUs, st.wakeLateMaxUs,
+                  (unsigned long)st.skipped, (unsigned long)st.overlong, st.mpxCycles, st.producerPct);
+    if (reset) out->ResetTiming();
+}
+
 void handleSerial()
 {
     static String line;
@@ -138,7 +150,8 @@ void handleSerial()
                               s.agcGain, s.peak, (unsigned long)s.clips, WiFi.RSSI());
                 break;
             }
-            default: Serial.println("f <MHz> | g <gain> | a <0|1> | d <Hz> | p <us> | x <0|1> | k <gain> | h <deg> | P <level> | R <0|1> | T <text> | C <0..2> | s");
+            case 't': printTiming(true); break;
+            default: Serial.println("f <MHz> | g <gain> | a <0|1> | d <Hz> | p <us> | x <0|1> | k <gain> | h <deg> | P <level> | R <0|1> | T <text> | C <0..2> | s | t");
         }
         line = "";
     }

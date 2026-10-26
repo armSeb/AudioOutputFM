@@ -31,6 +31,7 @@ arduino-cli compile -b esp32:esp32:esp32:PartitionScheme=min_spiffs \
   --library . examples/FMTransmitterWeb
 ```
 
+- PlatformIO: `platformio.ini` at the root builds `FMTransmitterWeb` (pioarduino). `esp32dev-lowram` rebuilds the framework with `custom_sdkconfig` (L2-to-L3 copy, smaller Wi-Fi pools) and defines `FMTX_TUNED_SDKCONFIG`, which makes the sketch call `WiFi.useStaticBuffers(true)` so Arduino doesn't override those pools. Keep the default dependency finder: `deep+` evaluates `#if CONFIG_IDF_TARGET_ESP32` without the sdkconfig and drops WiFi.h.
 - `FMTransmitterWeb` is about 1.29 MB. It needs `PartitionScheme=min_spiffs`: the default partition is 98 % full, and with PSRAM enabled the sketch overflows it.
 - On other targets (S2/S3/C3…), everything compiles to an empty `setup()`/`loop()`. CI checks that path on the ESP32-S3.
 - Build with **no warnings** (`--warnings all`), apart from those inside ESP8266Audio and the core.

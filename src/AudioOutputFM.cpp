@@ -111,6 +111,22 @@ static inline IRAM_ATTR void ringPut(uint32_t *r, uint32_t i, int16_t v)
     *p = w;
 }
 
+// Same as ringPut, for the producers (ConsumeSample, in flash): an IRAM_ATTR function can't be
+// inlined into flash code, and the call cost ~20 cycles per sample.
+static inline void ringPutP(uint32_t *r, uint32_t i, int16_t v)
+{
+    volatile uint32_t *p = &r[i >> 1];
+    uint32_t w = *p;
+    w = (i & 1) ? ((w & 0x0000FFFFu) | ((uint32_t)(uint16_t)v << 16)) : ((w & 0xFFFF0000u) | (uint16_t)v);
+    *p = w;
+}
+
+// Round to nearest without the lroundf() library call (one trunc.s); |x| stays far below 2^31
+static inline int32_t roundToInt(float x)
+{
+    return (int32_t)(x + (x >= 0.0f ? 0.5f : -0.5f));
+}
+
 // 32-bit-only memory first (IRAM), byte-addressable internal RAM as a fallback
 static void *allocWords(size_t bytes)
 {
@@ -144,7 +160,10 @@ bool IRAM_ATTR AudioOutputFM::_isr()
         if (isrPosted_) {
             // Under the IDF regi2c lock, but without waiting for the bus: nobody else
             // writes the APLL host, and the lock keeps IDF users serialized with us.
+            uint32_t tl = ccount();
             regi2c_enter_critical();
+            tl = ccount() - tl;
+            if (tl > lockMaxCyc_) lockMaxCyc_ = tl;
             if (diff & 0x00FF00) {
                 ri2c_post(I2C_APLL_DSDM1, (sdm >> 8) & 0xFF);
                 twoWrites_ = twoWrites_ + 1;
@@ -163,8 +182,10 @@ bool IRAM_ATTR AudioOutputFM::_isr()
 
     isrCount_ = isrCount_ + 1;
     uint32_t dt = ccount() - t0;
+    isrSumCyc_ = isrSumCyc_ + dt;
+    timCount_ = timCount_ + 1;
     if (dt > isrMaxCyc_) isrMaxCyc_ = dt;
-    if (dt > lateCyc_) isrLate_ = isrLate_ + 1;
+    if (dt > lateCyc_) { isrLate_ = isrLate_ + 1; overlong_ = overlong_ + 1; }
     return false;                               // no task woken
 }
 
@@ -300,6 +321,7 @@ bool AudioOutputFM::begin()
         modDone_ = false;
         isrPrio_ = -1;
         statsSinceUs_ = esp_timer_get_time();
+        ResetTiming();
         dspDirty_ = true;
         running_ = true;
         if (xTaskCreatePinnedToCore(modTaskEntry, "fm_mod", 3072, this, configMAX_PRIORITIES - 2, &modTask_, cpu_) != pdPASS) {
@@ -338,6 +360,7 @@ bool AudioOutputFM::begin()
     }
 
     statsSinceUs_ = esp_timer_get_time();
+    ResetTiming();
     dspDirty_ = true;
     running_ = true;
     return true;
@@ -424,6 +447,8 @@ void IRAM_ATTR AudioOutputFM::_modLoop()
             continue;
         }
         while ((int32_t)(ccount() - next) < 0) { }
+        uint32_t wl = ccount() - next;               // how late this deadline is served
+        if (wl > wakeLateMaxCyc_) wakeLateMaxCyc_ = wl;
         _isr();
         next += period;
         int32_t lag = (int32_t)(ccount() - next);
@@ -434,6 +459,7 @@ void IRAM_ATTR AudioOutputFM::_modLoop()
             rd_.store(r + (skip < avail ? skip : avail), std::memory_order_release);
             next += skip * period;
             isrLate_ = isrLate_ + skip;
+            skipped_ = skipped_ + skip;
         }
     }
     ri2c_wait_idle();
@@ -760,6 +786,7 @@ bool AudioOutputFM::consumeMono(int16_t sample[2])
     uint32_t w = wr_.load(std::memory_order_relaxed);
     if (w - rd_.load(std::memory_order_acquire) >= size_) return false;   // full: the generator retries later
     if (dspDirty_) setupDsp();
+    const uint32_t c0 = ccount();
 
     float x = (channels == 1) ? (float)sample[LEFTCHANNEL]
                               : 0.5f * ((float)sample[LEFTCHANNEL] + (float)sample[RIGHTCHANNEL]);
@@ -787,21 +814,25 @@ bool AudioOutputFM::consumeMono(int16_t sample[2])
     // Quantize to the SDM step; first-order noise shaping pushes the error up in
     // frequency, where the receiver's de-emphasis attenuates it
     float d = y * qScale_ + err_;
-    int32_t q = lroundf(d);
+    int32_t q = roundToInt(d);
     err_ = d - (float)q;
     if (q > 32767) q = 32767; else if (q < -32767) q = -32767;
 
-    ringPut(ring_, w & mask_, (int16_t)q);
+    ringPutP(ring_, w & mask_, (int16_t)q);
     wr_.store(w + 1, std::memory_order_release);
+    prodSumCyc_ = prodSumCyc_ + (ccount() - c0);
+    prodOut_ = prodOut_ + 1;
     return true;
 }
 
-bool AudioOutputFM::consumeStereo(int16_t sample[2])
+// O2 for this hot function only (the Arduino build is -Os)
+__attribute__((optimize("O2"))) bool AudioOutputFM::consumeStereo(int16_t sample[2])
 {
     const int T = RS_TAPS, P = RS_PHASES;
     uint32_t w = wr_.load(std::memory_order_relaxed);
     if (size_ - (w - rd_.load(std::memory_order_acquire)) < 16) return false;   // room for one input's outputs
     if (dspDirty_) setupDsp();
+    const uint32_t c0 = ccount(), w0 = w;
 
     float l = (float)sample[LEFTCHANNEL] * (1.0f / 32768.0f);
     float r = (channels == 1) ? l : (float)sample[RIGHTCHANNEL] * (1.0f / 32768.0f);
@@ -820,13 +851,20 @@ bool AudioOutputFM::consumeStereo(int16_t sample[2])
     y1r_ = yr;
 
     // Linked peak limiter: |L|, |R| <= 1 keeps (L+R)/2 + (L-R)/2*sub within +/-1
-    float a = fmaxf(fabsf(yl), fabsf(yr));
+    float al = fabsf(yl), ar0 = fabsf(yr);
+    float a = al > ar0 ? al : ar0;
     if (a > peak_) peak_ = a;
-    env_ = (a > env_) ? a : env_ * rel_;
+    bool attack = a > env_;
+    env_ = attack ? a : env_ * rel_;
     if (env_ > 1.0f) {
-        float k = 1.0f / env_;
-        yl *= k;
-        yr *= k;
+        // 1/env without a software division per sample: on release env only shrinks by rel_
+        // (< 0.02 %/sample), so one Newton step from the previous reciprocal is exact to float
+        // precision; a real division only on attack, when env jumps.
+        envInv_ = attack ? 1.0f / env_ : envInv_ * (2.0f - env_ * envInv_);
+        yl *= envInv_;
+        yr *= envInv_;
+    } else {
+        envInv_ = 1.0f;
     }
 
     // History (duplicated so the window is always contiguous: oldest .. newest)
@@ -843,24 +881,31 @@ bool AudioOutputFM::consumeStereo(int16_t sample[2])
     const float kd = kDiff_, ap = pilot_, aa = aAudio_, qs = qScale_, st = step_, ar = aRds_;
     while (frac_ < 1.0f) {
         int p = (int)(frac_ * P + 0.5f);                // nearest phase, 0..P
-        float L = 0.0f, R = 0.0f;
+        // 32-tap dot products, unrolled by 4 with constant offsets and two accumulators per
+        // channel (the -Os default build otherwise recomputes every address: ~11 instructions/tap)
+        float L0 = 0.0f, L1 = 0.0f, R0 = 0.0f, R1 = 0.0f;
+        const float *hl = wl, *hr = wrh;
         if (p <= P / 2) {
             const int16_t *c = &taps_[p * T];
-            for (int j = 0; j < T; j++) {
-                float k = (float)c[j];
-                L += wl[j] * k;
-                R += wrh[j] * k;
+            for (int j = 0; j < T; j += 4, c += 4, hl += 4, hr += 4) {
+                float k0 = c[0], k1 = c[1], k2 = c[2], k3 = c[3];
+                L0 += hl[0] * k0; R0 += hr[0] * k0;
+                L1 += hl[1] * k1; R1 += hr[1] * k1;
+                L0 += hl[2] * k2; R0 += hr[2] * k2;
+                L1 += hl[3] * k3; R1 += hr[3] * k3;
             }
         } else {                                         // mirrored phase: taps of P - p, reversed
-            const int16_t *c = &taps_[(P - p) * T + (T - 1)];
-            for (int j = 0; j < T; j++) {
-                float k = (float)c[-j];
-                L += wl[j] * k;
-                R += wrh[j] * k;
+            const int16_t *c = &taps_[(P - p) * T + (T - 4)];
+            for (int j = 0; j < T; j += 4, c -= 4, hl += 4, hr += 4) {
+                float k0 = c[3], k1 = c[2], k2 = c[1], k3 = c[0];
+                L0 += hl[0] * k0; R0 += hr[0] * k0;
+                L1 += hl[1] * k1; R1 += hr[1] * k1;
+                L0 += hl[2] * k2; R0 += hr[2] * k2;
+                L1 += hl[3] * k3; R1 += hr[3] * k3;
             }
         }
-        L *= (1.0f / 32768.0f);                          // Q15 taps
-        R *= (1.0f / 32768.0f);
+        const float L = (L0 + L1) * (1.0f / 32768.0f);   // Q15 taps
+        const float R = (R0 + R1) * (1.0f / 32768.0f);
         float mid = 0.5f * (L + R), side = 0.5f * (L - R);
         float pil = s_sin[ph_ >> 22];
         float sub = s_sin[((ph_ << 1) + phOff_) >> 22];  // 38 kHz locked to 2x pilot, + trim
@@ -886,13 +931,15 @@ bool AudioOutputFM::consumeStereo(int16_t sample[2])
         if (mpx > 1.0f) { mpx = 1.0f; clips_++; } else if (mpx < -1.0f) { mpx = -1.0f; clips_++; }
 
         // Plain rounding: noise shaping would push the error into the 23-53 kHz L-R band
-        int32_t q = lroundf(mpx * qs);
-        ringPut(ring_, w & mask_, (int16_t)q);
+        int32_t q = roundToInt(mpx * qs);
+        ringPutP(ring_, w & mask_, (int16_t)q);
         w++;
         frac_ += st;
     }
     frac_ -= 1.0f;
     wr_.store(w, std::memory_order_release);
+    prodSumCyc_ = prodSumCyc_ + (ccount() - c0);
+    prodOut_ = prodOut_ + (w - w0);
     return true;
 }
 
@@ -1050,6 +1097,19 @@ void AudioOutputFM::rdsNextGroup()
     rdsBit_ = 0;
 }
 
+void AudioOutputFM::ResetTiming()
+{
+    isrSumCyc_ = 0;
+    prodSumCyc_ = 0;
+    prodOut_ = 0;
+    timCount_ = 0;
+    lockMaxCyc_ = 0;
+    wakeLateMaxCyc_ = 0;
+    skipped_ = 0;
+    overlong_ = 0;
+    timSinceUs_ = esp_timer_get_time();
+}
+
 AudioOutputFM::Stats AudioOutputFM::GetStats(bool reset)
 {
     Stats s;
@@ -1069,6 +1129,18 @@ AudioOutputFM::Stats AudioOutputFM::GetStats(bool reset)
     s.clips        = clips_;
     s.stereo       = stereo_;
     s.isrPriority  = isrPrio_;
+    const float mhz = (float)getCpuFrequencyMhz();
+    const uint64_t isrSum = isrSumCyc_, prodSum = prodSumCyc_;
+    const uint32_t prodOut = prodOut_, tn = timCount_;
+    const float tElapsed = (now - timSinceUs_) * 1e-6f;
+    s.isrAvgUs      = tn ? (float)isrSum / tn / mhz : 0.0f;
+    s.slackPct      = (tn && lateCyc_) ? 100.0f * (1.0f - (float)isrSum / tn / lateCyc_) : 0.0f;
+    s.lockMaxUs     = lockMaxCyc_ / mhz;
+    s.wakeLateMaxUs = wakeLateMaxCyc_ / mhz;
+    s.skipped       = skipped_;
+    s.overlong      = overlong_;
+    s.mpxCycles     = prodOut ? (float)prodSum / prodOut : 0.0f;
+    s.producerPct   = tElapsed > 0.0f ? 100.0f * (float)prodSum / (tElapsed * mhz * 1e6f) : 0.0f;
     if (reset) {
         isrMaxCyc_ = 0;
         isrLate_ = 0;

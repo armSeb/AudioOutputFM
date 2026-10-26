@@ -42,6 +42,7 @@ void loop() {}
 #include "esp_task_wdt.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_rom_sys.h"
 #include "AudioFileSourceICYStream.h"
 #include "AudioFileSourceBuffer.h"
 #include "AudioGeneratorMP3.h"
@@ -131,6 +132,15 @@ void loadConfig()
     prefs.end();
 }
 
+// Station change: write only the index. Every flash write stalls core 1, so the carrier freezes
+// (the stereo loop skips samples) for as long as the write lasts: keep it to one key.
+void saveSel()
+{
+    prefs.begin("fmtx", false);
+    prefs.putInt("sel", cfg.sel);
+    prefs.end();
+}
+
 void saveOnAir()
 {
     prefs.begin("fmtx", false);
@@ -189,7 +199,10 @@ static const uint32_t RAM8 = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 static uint32_t largest8() { return heap_caps_get_largest_free_block(RAM8); }
 static uint32_t free8() { return heap_caps_get_free_size(RAM8); }
 static uint8_t sniffBuf[SNIFF_LEN];
-volatile uint32_t minLargest = UINT32_MAX;   // smallest "largest byte-addressable block" seen
+volatile uint32_t minLargest = UINT32_MAX;
+volatile uint32_t streamStartMs = 0;          // last stream start, to date heap lows
+volatile uint32_t allocFails = 0;             // failed heap allocations since boot
+TaskHandle_t audioTaskH = nullptr, webTaskH = nullptr;   // smallest "largest byte-addressable block" seen
 volatile bool aacOk = false;                  // the AAC decoder fits in the arena with a usable buffer
 volatile bool codecAac = false;               // codec of the stream on air
 
@@ -281,6 +294,7 @@ bool startStream(const PlayCmd &c)
 {
     if (apMode || !c.url[0]) return true;      // nothing to play: not an error
     Serial.printf("Playing %s (%s)\n", c.name, c.url);
+    streamStartMs = millis();
     setTitle("");
     out->SetRdsText(c.name);                   // until the stream sends a title
     // HTTP/1.0: a server may otherwise answer HTTP/1.1 with "Transfer-Encoding: chunked", and
@@ -416,6 +430,7 @@ void handleState()
     j += ",\"uptime\":" + String(millis() / 1000);
     j += ",\"reset\":" + jstr(resetReason());
     j += ",\"fw\":" + jstr(FW_VERSION);
+    j += ",\"allocfail\":" + String(allocFails);
     j += "}}";
     server.send(200, "application/json", j);
 }
@@ -474,7 +489,7 @@ void handleSelect()
     int i = server.arg("i").toInt();
     if (i < 0 || i >= cfg.count) { server.send(400, "text/plain", "Bad station index"); return; }
     cfg.sel = i;
-    saveConfig();
+    saveSel();
     requestPlay();
     server.send(200, "application/json", "{}");
 }
@@ -625,7 +640,7 @@ void audioTask(void *)
     if (started && !wantOnAir) goOffAir();
     // Web task last: its stack must not fragment the heap before the big buffers. Created from
     // here because setup() (core 1) may already be preempted by the stereo modulator.
-    xTaskCreatePinnedToCore(webTask, "web", 6144, nullptr, 2, nullptr, 0);
+    xTaskCreatePinnedToCore(webTask, "web", 6144, nullptr, 2, &webTaskH, 0);
     Serial.printf("Heap after start: free %u, largest block %u\n", (unsigned)free8(), (unsigned)largest8());
 
     esp_task_wdt_add(nullptr);                 // reboot if this task ever hangs for 30 s
@@ -697,6 +712,16 @@ void audioTask(void *)
             // that lasts 15 s counts, and the bar is what the code still needs (a 1.6 KB web reply,
             // a few KB for HTTP and TCP), not a big block.
             uint32_t lg = largest8(), fr = free8();
+            // Heap diagnostics: report each new low of the internal heap, with the time since the
+            // last stream start, to tell a dip at station change from a slow leak
+            static uint32_t lastLow = UINT32_MAX;
+            uint32_t low = heap_caps_get_minimum_free_size(RAM8);
+            if (low < lastLow) {
+                if (lastLow != UINT32_MAX)
+                    Serial.printf("Heap: new low %u bytes free (now free %u, largest %u, %.1f s after the last stream start)\n",
+                                  (unsigned)low, (unsigned)fr, (unsigned)lg, (millis() - streamStartMs) / 1000.0f);
+                lastLow = low;
+            }
             if (lg < minLargest) minLargest = lg;
             bool shortage = lg < 2048 || fr < 10240;
             if (shortage && !heapLow) Serial.printf("Heap low: free %u, largest block %u\n", (unsigned)fr, (unsigned)lg);
@@ -763,6 +788,18 @@ static void checkRoaming()
     }
 }
 
+// Timing of the modulator (cumulative since the last 't'): see AudioOutputFM::Stats
+static void printTiming(bool reset)
+{
+    AudioOutputFM::Stats st = out->GetStats(false);
+    Serial.printf("timing | writer avg %.2f us, max %.2f us, idle %.0f%% | regi2c lock wait max %.1f us"
+                  " | deadline late max %.1f us, skipped %lu, overlong %lu"
+                  " | producer %.0f cycles/sample, %.1f%% of its core\n",
+                  st.isrAvgUs, st.isrMaxUs, st.slackPct, st.lockMaxUs, st.wakeLateMaxUs,
+                  (unsigned long)st.skipped, (unsigned long)st.overlong, st.mpxCycles, st.producerPct);
+    if (reset) out->ResetTiming();
+}
+
 static void printStatus()
 {
     AudioOutputFM::Stats st = out->GetStats();
@@ -773,6 +810,11 @@ static void printStatus()
                   (unsigned long)st.isrLate, st.peak, (int)WiFi.RSSI(), WiFi.BSSIDstr().c_str(), (int)WiFi.channel(),
                   (unsigned)free8(), (unsigned)largest8(),
                   (unsigned)heap_caps_get_minimum_free_size(RAM8), (unsigned long)(millis() / 1000));
+    printTiming(false);
+    // Unused stack (bytes): candidates for trimming if RAM is short
+    Serial.printf("stacks free | audio %u, web %u\n",
+                  audioTaskH ? (unsigned)uxTaskGetStackHighWaterMark(audioTaskH) : 0,
+                  webTaskH ? (unsigned)uxTaskGetStackHighWaterMark(webTaskH) : 0);
 }
 
 // Web page + serial console + Wi-Fi supervision (core 0, priority 2): may wait on a slow
@@ -799,8 +841,10 @@ void webTask(void *)
                     Serial.printf("RF %s\n", v != 0 ? "on" : "off");
                 } else if (line[0] == 's') {
                     printStatus();
+                } else if (line[0] == 't') {
+                    printTiming(true);
                 } else {
-                    Serial.println("o 0|1 (off/on air) | x 0|1 (RF output only) | s (status)");
+                    Serial.println("o 0|1 (off/on air) | x 0|1 (RF output only) | s (status) | t (timing, then restart the measurement)");
                 }
             }
             line = "";
@@ -857,6 +901,12 @@ void setup()
     audioLogger = &Serial;                     // ESP8266Audio's own error messages
     loadConfig();
 
+#if defined(FMTX_TUNED_SDKCONFIG)
+    // PlatformIO "lowram" build: the framework was rebuilt with smaller Wi-Fi buffer pools. Arduino
+    // otherwise overrides them at Wi-Fi init (32 dynamic RX buffers); static-buffer mode makes it use
+    // the sdkconfig values instead.
+    WiFi.useStaticBuffers(true);
+#endif
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.setHostname(HOSTNAME);
@@ -898,6 +948,19 @@ void setup()
     wdt.idle_core_mask = 0;
     wdt.trigger_panic = true;
     esp_task_wdt_reconfigure(&wdt);
+
+    // Log failed allocations (ROM printf: allocates nothing, safe from any task). Only the first
+    // 20: a synchronous UART print slows the failing task down; the page keeps the full count.
+    heap_caps_register_failed_alloc_callback([](size_t size, uint32_t caps, const char *fn) {
+        allocFails = allocFails + 1;
+        if (allocFails <= 20) {
+            // Free vs largest block tells exhaustion from fragmentation; the task tells who asked
+            // (wifi = driver RX/TX buffers, tiT = lwIP, audio/web = this sketch)
+            esp_rom_printf("[heap] %s: %u bytes failed (caps 0x%x) in task %s, internal free %u, largest %u\n",
+                           fn ? fn : "?", (unsigned)size, (unsigned)caps, pcTaskGetName(nullptr),
+                           (unsigned)heap_caps_get_free_size(RAM8), (unsigned)heap_caps_get_largest_free_block(RAM8));
+        }
+    });
     wantOnAir = cfg.onair;
     Serial.printf("FM transmitter %s\n", FW_VERSION);
     Serial.printf("Last reset: %s. Starting %s\n", resetReason(), cfg.onair ? "on air" : "off air");
@@ -905,7 +968,8 @@ void setup()
     // setup() runs on core 1, which the stereo modulator is about to take: start from core 0
     playQ = xQueueCreate(1, sizeof(PlayCmd));
     requestPlay();                             // first station, picked up by the audio task
-    xTaskCreatePinnedToCore(audioTask, "audio", 10240, nullptr, 3, nullptr, 0);   // starts the web task itself
+    // 6 KB: measured peak ~3.4 KB (MP3 and AAC/HE-AAC streams), see "stacks free" in the s command
+    xTaskCreatePinnedToCore(audioTask, "audio", 6144, nullptr, 3, &audioTaskH, 0);   // starts the web task itself
 }
 
 void loop()

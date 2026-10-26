@@ -41,7 +41,7 @@
 
 #include <Arduino.h>
 
-#define AUDIOOUTPUTFM_VERSION "0.9.2"            // keep in sync with library.properties / library.json
+#define AUDIOOUTPUTFM_VERSION "0.9.8"            // keep in sync with library.properties / library.json
 
 #if defined(ESP32) && defined(CONFIG_IDF_TARGET_ESP32)
 
@@ -67,6 +67,17 @@ public:
         uint32_t clips;         // samples hard-clipped (cumulative)
         bool     stereo;        // multiplex mode active
         int      isrPriority;   // interrupt level allocated (0 = driver default, -1 = dedicated stereo loop)
+        // Timing instrumentation: cumulative since begin() or the last ResetTiming(), so a web page
+        // polling GetStats() doesn't erase a long measurement
+        float    isrAvgUs;      // average write routine (ISR, or stereo loop step)
+        float    slackPct;      // share of each sample period the writer spends idle (100 - work)
+        float    lockMaxUs;     // longest wait for the IDF regi2c lock (Wi-Fi PHY holding the bus)
+        float    wakeLateMaxUs; // stereo loop: longest delay past a write deadline (preemption, flash ops)
+        uint32_t skipped;       // stereo loop: samples dropped to catch up after a delay
+        uint32_t overlong;      // writes that took longer than one sample period
+        float    mpxCycles;     // producer cycles per ring sample: stereo = per multiplex output (resampler +
+                                // MPX + RDS, plus the per-input DSP spread over ~3 outputs); mono = per audio sample
+        float    producerPct;   // share of the producer core spent in ConsumeSample (stereo or mono DSP)
     };
 
     static constexpr float MIN_MHZ = 88.0f;
@@ -95,6 +106,7 @@ public:
     bool  SetBufferSize(int samples);                   // before begin() only, rounded up to a power of 2
     void  end();                                        // stop everything and release the APLL
     Stats GetStats(bool reset = true);
+    void  ResetTiming();                                // restart the timing fields of Stats
 
     // --- Stereo (experimental) ---
     // In stereo the modulator is a busy loop that OWNS core `cpu` (default 1): nothing else
@@ -183,6 +195,11 @@ private:
     volatile bool     isrPosted_ = false;
     volatile uint32_t underruns_ = 0, isrMaxCyc_ = 0, isrCount_ = 0, twoWrites_ = 0;
     volatile uint32_t isrLate_ = 0, lateCyc_ = 5442;
+    // Timing instrumentation (see Stats)
+    volatile uint64_t isrSumCyc_ = 0, prodSumCyc_ = 0;
+    volatile uint32_t timCount_ = 0;
+    int64_t           timSinceUs_ = 0;
+    volatile uint32_t lockMaxCyc_ = 0, wakeLateMaxCyc_ = 0, skipped_ = 0, overlong_ = 0, prodOut_ = 0;
     volatile float    lsbHz_ = 152.59f;
 
     // DSP (generator context)
@@ -192,6 +209,7 @@ private:
     Biquad lp1_, lp2_;
     float  peG_ = 1, peA_ = 0, peB_ = 0;      // pre-emphasis IIR (designPreemphasis)
     float  rel_ = 0, agcK_ = 0, agcS_ = 0, qScale_ = 0;
+    float  envInv_ = 1;                       // 1 / env_ while limiting (stereo)
     float  x1_ = 0, x1r_ = 0, y1_ = 0, y1r_ = 0, err_ = 0, env_ = 0, pw_ = 0, agc_ = 1, peak_ = 0;
     uint32_t clips_ = 0;
 

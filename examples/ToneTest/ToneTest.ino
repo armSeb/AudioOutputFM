@@ -9,7 +9,7 @@
 //   t 1000          tone frequency (Hz)        v 0.5   tone level (0..1)
 //   f 100.1         carrier (MHz)              x 1|0   carrier on/off
 //   k 1.11          L-R gain trim              h -22   38 kHz phase trim (degrees)
-//   s               statistics
+//   s               statistics             T       timing (then restart it)
 //
 // Hardware: RF out on GPIO0 through a DC-blocking capacitor and a low-pass filter.
 // Check your local regulations.
@@ -51,6 +51,18 @@ void toneTask(void *)
     }
 }
 
+// Timing of the modulator (cumulative since the last 't'): see AudioOutputFM::Stats
+static void printTiming(bool reset)
+{
+    AudioOutputFM::Stats st = out->GetStats(false);
+    Serial.printf("timing | writer avg %.2f us, max %.2f us, idle %.0f%% | regi2c lock wait max %.1f us"
+                  " | deadline late max %.1f us, skipped %lu, overlong %lu"
+                  " | producer %.0f cycles/sample, %.1f%% of its core\n",
+                  st.isrAvgUs, st.isrMaxUs, st.slackPct, st.lockMaxUs, st.wakeLateMaxUs,
+                  (unsigned long)st.skipped, (unsigned long)st.overlong, st.mpxCycles, st.producerPct);
+    if (reset) out->ResetTiming();
+}
+
 void consoleTask(void *)
 {
     String line;
@@ -82,7 +94,8 @@ void consoleTask(void *)
                                       (unsigned long)st.size, (unsigned long)st.underruns, st.peak);
                         break;
                     }
-                    default: Serial.println("l|r|b|m | t <Hz> | v <0..1> | f <MHz> | x <0|1> | k <gain> | h <deg> | s");
+                    case 'T': printTiming(true); break;
+                    default: Serial.println("l|r|b|m | t <Hz> | v <0..1> | f <MHz> | x <0|1> | k <gain> | h <deg> | s | T (timing)");
                 }
             }
             line = "";

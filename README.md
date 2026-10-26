@@ -84,7 +84,25 @@ A filter with standard component values, its simulated response and build notes 
    - **CPU Frequency:** 240 MHz. The stereo loop is timed in CPU cycles.
 5. **First test:** open `examples/ToneTest` and upload it. Tune a receiver to 100.1 MHz. You should hear a 1 kHz tone on the left channel, see a stereo indicator, and read "TONETEST" on an RDS receiver.
 
-PlatformIO users need a platform that ships Arduino-ESP32 3.x, such as [pioarduino](https://github.com/pioarduino/platform-espressif32). A `library.json` is included.
+**PlatformIO.** The repository is also a PlatformIO project for `FMTransmitterWeb` (`platformio.ini`, using [pioarduino](https://github.com/pioarduino/platform-espressif32), which ships Arduino-ESP32 3.x). Its environments:
+- **`esp32dev`:** same as the Arduino IDE.
+- **`esp32dev-lowram` (recommended for 24/7 use):** rebuilds the framework with a RAM-oriented ESP-IDF configuration (`sdkconfig.lowram`).
+  - Received Wi-Fi frames are copied into right-sized buffers, so a stream start no longer pins 2.3 KB per TCP segment.
+  - The Wi-Fi buffer pools are capped and Bluetooth is disabled.
+  - The first build takes 10–20 minutes.
+
+  Measured against the Arduino IDE build, on the same board:
+
+  | | Arduino IDE | `esp32dev-lowram` |
+  |---|---|---|
+  | Lowest free heap, stream starts included | 1.1–4.6 KB | 19–30 KB |
+  | Failed Wi-Fi allocations per stream start | ~20 | 0 |
+  | Stereo loop at rest: max regi2c lock wait / skipped samples | 1.1 µs / ~0.3 per s | 0.9 µs / 0–5 per 10–20 s window |
+
+  Use pioarduino's own PlatformIO core (see below). Its flash settings are QIO 80 MHz, like the Arduino IDE: PlatformIO's default for `esp32dev` (DIO 40 MHz) slows everything run from flash, including Wi-Fi code that holds the regi2c lock, and makes the stereo loop skip samples.
+- **`wrover` and `esp32cam`:** boards with PSRAM.
+
+Run `pio run -e <env> -t upload` with **pioarduino's own PlatformIO core**: the pioarduino IDE extension in VS Code, or `~/.platformio/penv/bin/pio` on the command line. The upstream core ships a newer SCons that the platform's ESP-IDF builder can't use, and `esp32dev-lowram` then fails with `No module named 'SCons.Tool.FortranCommon'`.
 
 ---
 
@@ -197,6 +215,8 @@ Serial console: `o 0|1` (off/on air), `x 0|1` (RF output only), `s` (status line
 | `stop()` | Called by generators at the end of a stream. **Keeps the carrier up** (silence), so receivers don't mute or seek |
 | `end()` | Stops everything and releases the APLL. Buffers stay allocated, ready for `begin()` |
 | `GetStats(reset = true)` | `rateHz`, `measuredHz`, `fill`/`size`, `underruns`, `isrMaxUs`, `isrLate`, `twoWritesPct`, `agcGain`, `peak`, `clips`, `stereo`, `isrPriority` |
+| | Timing, cumulative until `ResetTiming()`: `isrAvgUs`, `slackPct` (writer idle share), `lockMaxUs` (regi2c lock wait), `wakeLateMaxUs`, `skipped`, `overlong`, `mpxCycles` (producer cycles per ring sample), `producerPct` |
+| `ResetTiming()` | Restart the timing measurement |
 | **Stereo** | |
 | `SetStereo(on)` | Before `begin()`. The modulator then **owns its core** (see [Stereo](#stereo)) |
 | `SetStereoTrim(k, deg)` | L−R gain and 38 kHz phase trim. Defaults 1.11 and −22°, measured on hardware |
